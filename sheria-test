@@ -1,0 +1,193 @@
+#!/bin/bash
+
+# Base URL for the API
+API_URL="http://localhost:8001"
+
+# File to store the JWT token
+TOKEN_FILE="/tmp/sheria_token"
+
+# Colors for output
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+NC='\033[0m' # No Color
+
+# Function to get stored token
+get_token() {
+    if [ -f "$TOKEN_FILE" ]; then
+        cat "$TOKEN_FILE"
+    else
+        echo ""
+    fi
+}
+
+# Function to store token
+store_token() {
+    echo "$1" > "$TOKEN_FILE"
+}
+
+# Function to make authenticated requests
+auth_request() {
+    local method="$1"
+    local endpoint="$2"
+    local data="$3"
+    local token=$(get_token)
+    
+    if [ -z "$token" ]; then
+        echo -e "${RED}Error: Not authenticated. Please login first.${NC}" >&2
+        return 1
+    fi
+    
+    if [ -z "$data" ]; then
+        curl -s -X "$method" \
+            -H "Authorization: Bearer $token" \
+            -H "Content-Type: application/json" \
+            "$API_URL$endpoint"
+    else
+        curl -s -X "$method" \
+            -H "Authorization: Bearer $token" \
+            -H "Content-Type: application/json" \
+            -d "$data" \
+            "$API_URL$endpoint"
+    fi
+}
+
+# Command handlers
+handle_login() {
+    local user_id="$1"
+    local email="$2"
+    
+    # Create form data
+    local response=$(curl -s -X POST \
+        -H "Content-Type: application/x-www-form-urlencoded" \
+        -d "username=$user_id&password=any_password" \
+        "$API_URL/token")
+    
+    # Extract token from response
+    local token=$(echo "$response" | jq -r '.access_token')
+    
+    if [ "$token" != "null" ] && [ ! -z "$token" ]; then
+        store_token "$token"
+        echo -e "${GREEN}Logged in as $user_id${NC}" $([ ! -z "$email" ] && echo "($email)")
+    else
+        echo -e "${RED}Login failed: $response${NC}"
+        exit 1
+    fi
+}
+
+handle_create() {
+    local response=$(auth_request "POST" "/conversations" '{"language":"en"}')
+    if [ $? -ne 0 ]; then
+        return 1
+    fi
+    
+    local conv_id=$(echo "$response" | jq -r '.id')
+    
+    if [ "$conv_id" != "null" ] && [ ! -z "$conv_id" ]; then
+        echo -e "${GREEN}Created conversation: $conv_id${NC}"
+    else
+        echo -e "${RED}Error: $response${NC}"
+        exit 1
+    fi
+}
+
+handle_list() {
+    local response=$(auth_request "GET" "/conversations")
+    if [ $? -ne 0 ]; then
+        return 1
+    fi
+    
+    if [[ "$response" == *"detail"* ]]; then
+        echo -e "${RED}Error: $response${NC}"
+        exit 1
+    else
+        echo "$response" | jq '.'
+    fi
+}
+
+handle_ask() {
+    local query="$1"
+    local conv_id="$2"
+    
+    # If no conversation ID, create one
+    if [ -z "$conv_id" ]; then
+        echo "No active conversation. Creating one..."
+        response=$(auth_request "POST" "/conversations" '{"language":"en"}')
+        if [ $? -ne 0 ]; then
+            return 1
+        fi
+        conv_id=$(echo "$response" | jq -r '.id')
+    fi
+    
+    local data="{\"query\":\"$query\",\"conversation_id\":\"$conv_id\"}"
+    local response=$(auth_request "POST" "/query" "$data")
+    if [ $? -ne 0 ]; then
+        return 1
+    fi
+    
+    if [[ "$response" == *"detail"* ]]; then
+        echo -e "${RED}Error: $response${NC}"
+        exit 1
+    else
+        echo -e "\n${GREEN}You:${NC} $query\n"
+        echo -e "${GREEN}A:${NC} $(echo "$response" | jq -r '.response')\n"
+        echo "Conversation ID: $(echo "$response" | jq -r '.conversation_id')"
+        echo "Confidence: $(echo "$response" | jq -r '.confidence_score')"
+        echo "Processed at: $(echo "$response" | jq -r '.processed_at')"
+    fi
+}
+
+# Main command router
+case "$1" in
+    "login")
+        shift
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --user-id=*)
+                    user_id="${1#*=}"
+                    shift
+                    ;;
+                --email=*)
+                    email="${1#*=}"
+                    shift
+                    ;;
+                *)
+                    echo -e "${RED}Unknown parameter: $1${NC}"
+                    exit 1
+                    ;;
+            esac
+        done
+        handle_login "$user_id" "$email"
+        ;;
+    "create")
+        handle_create
+        ;;
+    "list")
+        handle_list
+        ;;
+    "ask")
+        shift
+        query=""
+        conv_id=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --query=*)
+                    query="${1#*=}"
+                    shift
+                    ;;
+                --conversation-id=*)
+                    conv_id="${1#*=}"
+                    shift
+                    ;;
+                *)
+                    echo -e "${RED}Unknown parameter: $1${NC}"
+                    exit 1
+                    ;;
+            esac
+        done
+        handle_ask "$query" "$conv_id"
+        ;;
+    *)
+        echo "Usage: $0 {login|create|list|ask} [options]"
+        exit 1
+        ;;
+esac

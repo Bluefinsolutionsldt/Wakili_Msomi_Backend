@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sheria Kiganjani - Legal AI Assistant</title>
+    <link href="/static/css/styles.css" rel="stylesheet" />
+    <noscript>
+      <style>
+        .js-warning {
+          display: block;
+          padding: 1rem;
+          background: #ffeb3b;
+          color: #000;
+          text-align: center;
+        }
+      </style>
+    </noscript>
+    <script>
+      // Global state
+      const state = {
+        currentUser: {
+          username: localStorage.getItem("username") || "Guest",
+        },
+        currentConversation: null,
+        isLoading: false,
+      };
+
+      document.addEventListener("DOMContentLoaded", async () => {
+        const token = localStorage.getItem("access_token");
+        if (!token) {
+          window.location.href = "/";
+          return;
+        }
+
+        // Check authentication status
+        try {
+          const response = await fetch("/auth/status", {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (!response.ok) {
+            localStorage.removeItem("access_token");
+            localStorage.removeItem("username");
+            window.location.href = "/";
+            return;
+          }
+          const userData = await response.json();
+          state.currentUser.username = userData.username;
+          localStorage.setItem("username", userData.username);
+          document.getElementById("username-display").textContent =
+            userData.username;
+        } catch (error) {
+          console.error("Failed to verify auth status:", error);
+          localStorage.removeItem("access_token");
+          localStorage.removeItem("username");
+          window.location.href = "/";
+          return;
+        }
+
+        initApp();
+      });
+
+      function initApp() {
+        setupEventListeners();
+        loadConversations();
+        checkTokenExpiration();
+      }
+
+      function setupEventListeners() {
+        const logoutBtn = document.getElementById("logout-btn");
+        if (logoutBtn) logoutBtn.addEventListener("click", logout);
+
+        const newConversationBtn = document.getElementById("new-conversation");
+        if (newConversationBtn)
+          newConversationBtn.addEventListener("click", createNewConversation);
+
+        const sendMessageBtn = document.getElementById("send-message");
+        if (sendMessageBtn)
+          sendMessageBtn.addEventListener("click", sendMessageHandler);
+
+        document.querySelectorAll(".open-conversation").forEach((btn) => {
+          btn.addEventListener("click", openConversation);
+        });
+      }
+
+      async function loadConversations() {
+        try {
+          setLoading(true);
+          const token = localStorage.getItem("access_token");
+          const response = await fetch("/conversations", {
+            headers: {
+              Authorization: `Bearer ${token}`,
+            },
+          });
+          if (!response.ok) throw new Error("Failed to load conversations");
+          const conversations = await response.json();
+          renderConversations(conversations);
+        } catch (error) {
+          showError("Failed to load conversations: " + error.message);
+        } finally {
+          setLoading(false);
+        }
+      }
+
+      async function createNewConversation() {
+        try {
+          setLoading(true);
+          const token = localStorage.getItem("access_token");
+          const response = await fetch("/conversations", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${token}`,
+            },
+            body: JSON.stringify({
+              language: "sw",
+              metadata: {},
+            }),
+          });
+          if (!response.ok) throw new Error("Failed to create conversation");
+          const newConversation = await response.json();
+          renderConversations([newConversation]);
+          state.currentConversation = newConversation.id;
+          renderMessages(newConversation.messages);
+        } catch (error) {
+          showError("Failed to create conversation: " + error.message);
+        } finally {
+          setLoading(false);
+        }
+      }
+
+      async function sendMessageHandler() {
+        const messageInput = document.getElementById("message-input");
+        const message = messageInput.value.trim();
+        if (!message || !state.currentConversation) {
+          showError("Please select a conversation and enter a message");
+          return;
+        }
+
+        try {
+          setLoading(true);
+          const token = localStorage.getItem("access_token");
+          const response = await fetch("/query", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${token}`,
+            },
+            body: JSON.stringify({
+              query: message,
+              conversation_id: state.currentConversation,
+              language: "sw",
+            }),
+          });
+          if (!response.ok) throw new Error("Failed to send message");
+          const queryResponse = await response.json();
+          const convResponse = await fetch(
+            `/conversations/${state.currentConversation}`,
+            {
+              headers: { Authorization: `Bearer ${token}` },
+            }
+          );
+          if (!convResponse.ok) throw new Error("Failed to fetch conversation");
+          const conversation = await convResponse.json();
+          renderMessages(conversation.messages);
+          messageInput.value = "";
+        } catch (error) {
+          showError("Failed to send message: " + error.message);
+        } finally {
+          setLoading(false);
+        }
+      }
+
+      async function openConversation(event) {
+        const conversationId = event.target.dataset.conversationId;
+        state.currentConversation = conversationId;
+        try {
+          setLoading(true);
+          const token = localStorage.getItem("access_token");
+          const response = await fetch(`/conversations/${conversationId}`, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (!response.ok) throw new Error("Failed to load conversation");
+          const conversation = await response.json();
+          renderMessages(conversation.messages);
+        } catch (error) {
+          showError("Failed to load conversation: " + error.message);
+        } finally {
+          setLoading(false);
+        }
+      }
+
+      function logout() {
+        localStorage.removeItem("access_token");
+        localStorage.removeItem("username");
+        window.location.href = "/";
+      }
+
+      function setLoading(isLoading) {
+        state.isLoading = isLoading;
+        const sendButton = document.getElementById("send-message");
+        if (sendButton) {
+          sendButton.disabled = isLoading;
+          sendButton.textContent = isLoading ? "Loading..." : "Send";
+        }
+      }
+
+      function showError(message) {
+        const errorEl = document.createElement("div");
+        errorEl.className = "error-message";
+        errorEl.textContent = message;
+        document.querySelector(".chat-container").prepend(errorEl);
+        setTimeout(() => errorEl.remove(), 5000);
+      }
+
+      function renderConversations(conversations) {
+        const container = document.getElementById("conversations-container");
+        container.innerHTML = "";
+        conversations.forEach((conversation, index) => {
+          const div = document.createElement("div");
+          div.className = "conversation-item";
+          div.dataset.conversationId = conversation.id;
+          div.innerHTML = `
+            <h3>Conversation #${index + 1}</h3>
+            <p>Language: ${
+              conversation.language === "sw" ? "Swahili" : "English"
+            }</p>
+            <p>Created: ${new Date(
+              conversation.created_at
+            ).toLocaleDateString()}</p>
+            <button class="open-conversation btn btn-secondary" data-conversation-id="${
+              conversation.id
+            }">Open</button>
+          `;
+          container.appendChild(div);
+        });
+        setupEventListeners();
+      }
+
+      function renderMessages(messages) {
+        const container = document.getElementById("messages-container");
+        container.innerHTML = "";
+        messages.forEach((msg) => {
+          const div = document.createElement("div");
+          div.className = `message ${msg.role}-message`;
+          div.innerHTML = `
+            <strong>${
+              msg.role === "assistant"
+                ? "Sheria Kiganjani"
+                : state.currentUser.username
+            }</strong>: 
+            ${msg.content.replace(/\n/g, "<br>")}
+            <small>(${new Date(msg.timestamp).toLocaleString()})</small>
+          `;
+          container.appendChild(div);
+        });
+        container.scrollTop = container.scrollHeight;
+      }
+
+      function checkTokenExpiration() {
+        // Placeholder: Decode JWT and check 'exp' if needed
+        // For now, rely on /auth/status to handle invalid tokens
+      }
+    </script>
+    <style>
+      .error-message {
+        color: #fecaca;
+        padding: 10px;
+        margin: 10px 0;
+        background: #7f1d1d;
+        border: 1px solid #b91c1c;
+        border-radius: 8px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="js-warning">JavaScript is required for this application.</div>
+    <div class="container">
+      <header>
+        <h1>
+          Welcome,
+          <span id="username-display">Guest</span>
+        </h1>
+        <div class="auth-section">
+          <button id="logout-btn" class="btn btn-danger">Logout</button>
+        </div>
+      </header>
+
+      <div class="conversation-list">
+        <h2>Your Conversations</h2>
+        <div id="conversations-container"></div>
+        <button id="new-conversation" class="btn btn-primary mt-3">
+          Start New Conversation
+        </button>
+      </div>
+
+      <div class="chat-container">
+        <div id="messages-container"></div>
+        <div class="message-input">
+          <input
+            type="text"
+            id="message-input"
+            placeholder="Type your legal question..."
+          />
+          <button id="send-message" class="btn btn-primary">Send</button>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>

@@ -1,0 +1,6 @@
+/.env
+/.pytest_cache
+/tests
+/venv
+/node_modules
+/package-lock.json

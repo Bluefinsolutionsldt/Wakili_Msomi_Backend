@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Sheria Kiganjani Chat</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        .conversation {
+            border: 1px solid #ccc;
+            margin: 10px 0;
+            padding: 15px;
+            border-radius: 5px;
+        }
+
+        .message {
+            margin: 10px 0;
+            padding: 10px;
+            border-radius: 5px;
+        }
+
+        .message.user {
+            background: #e6f3ff;
+            margin-left: 20px;
+        }
+
+        .message.assistant {
+            background: #f0f0f0;
+            margin-right: 20px;
+        }
+
+        .message small {
+            display: block;
+            color: #666;
+            font-size: 0.8em;
+            margin-top: 5px;
+        }
+
+        #input-area {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            padding: 20px;
+            background: white;
+            border-top: 1px solid #ccc;
+        }
+
+        #input-area input {
+            width: 80%;
+            padding: 10px;
+            margin-right: 10px;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+        }
+
+        button {
+            padding: 10px 20px;
+            background: #007bff;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+
+        button:hover {
+            background: #0056b3;
+        }
+
+        .delete-btn {
+            background: #dc3545;
+            float: right;
+        }
+
+        .delete-btn:hover {
+            background: #c82333;
+        }
+    </style>
+</head>
+<body>
+    <h1>Sheria Kiganjani Legal Assistant</h1>
+    
+    <div id="chat-interface">
+        <button onclick="app.createNewConversation()">New Conversation</button>
+        <div id="conversations"></div>
+        
+        <div id="input-area">
+            <input type="text" id="query-input" 
+                   placeholder="Ask a legal question..."
+                   onkeypress="if(event.key === 'Enter') sendQuestion()">
+            <button onclick="sendQuestion()">Send</button>
+        </div>
+    </div>
+
+    <script src="api_usage.js"></script>
+    <script>
+        const app = new SheriaKiganjaniUI();
+        app.init();
+
+        async function sendQuestion() {
+            const input = document.getElementById('query-input');
+            const query = input.value;
+            if (query) {
+                await app.sendQuestion(query);
+                input.value = '';
+            }
+        }
+    </script>
+</body>
+</html>

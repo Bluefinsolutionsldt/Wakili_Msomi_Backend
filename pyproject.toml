@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sheria-kiganjani"
+version = "0.1.0"
+description = "Legal Assistant AI for East African Legal Services"
+authors = [
+    {name = "Sheria Kiganjani Team"}
+]
+requires-python = ">=3.8"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+asyncio_mode = "strict"
