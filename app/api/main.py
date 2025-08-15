@@ -35,8 +35,8 @@ logger = logging.getLogger(__name__)
 # Initialize FastAPI app
 app = FastAPI(title="Sheria Kiganjani API")
 
-# Initialize conversation store
-conversation_store = ConversationStore()
+# Import conversation store from claude_client
+from ..core.claude_client import conversation_store
 
 # Configure CORS - this must be done before adding any routes
 # origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:8080,http://localhost:3000,http://127.0.0.1:8080,http://0.0.0.0:8080,https://wakilimsomi.vercel.app,https://localhost:3000").split(",")
@@ -632,56 +632,15 @@ async def process_query(
     try:
         if not request.conversation_id:
             raise HTTPException(status_code=400, detail="conversation_id is required")
-            
-        # Get conversation
-        conversation = await conversation_store.get_conversation(current_user["username"], request.conversation_id)
-        if not conversation:
-            raise HTTPException(status_code=404, detail="Conversation not found")
-            
-        # Verify ownership
-        if conversation.username != current_user["username"]:
-            raise HTTPException(status_code=403, detail="Access denied")
-        
-        # Create user message
-        user_message = Message(
-            role=MessageRole.USER,
-            content=request.query,
-            created_at=datetime.now()
-        )
-        
-        # Add user message to conversation
-        success = await conversation_store.add_message(
-            username=current_user["username"],
-            conversation_id=conversation.id,
-            message=user_message
-        )
-        if not success:
-            raise HTTPException(status_code=500, detail="Failed to add message")
         
         # Process query with Claude
         response_content = await claude_client.process_query(
             request.query,
-            language=request.language or conversation.language,
-            conversation_id=conversation.id,
+            language=request.language,
+            conversation_id=request.conversation_id,
             username=current_user["username"]
         )
-        
-        # Create assistant message
-        response_message = Message(
-            role=MessageRole.ASSISTANT,
-            content=response_content,
-            created_at=datetime.now()
-        )
-        
-        # Add response to conversation
-        success = await conversation_store.add_message(
-            username=current_user["username"],
-            conversation_id=conversation.id,
-            message=response_message
-        )
-        if not success:
-            raise HTTPException(status_code=500, detail="Failed to add assistant message")
-        
+
         # Decrement free messages if user is using free access
         if current_user.get("access_type") == "free_messages":
             from ..auth_utils import decrement_free_messages
@@ -689,8 +648,8 @@ async def process_query(
         
         return {
             "response": response_content,
-            "conversation_id": conversation.id,
-            "language": request.language or conversation.language,
+            "conversation_id": request.conversation_id,
+            "language": request.language,
             "confidence_score": 0.95,
             "processed_at": datetime.now().isoformat()
         }

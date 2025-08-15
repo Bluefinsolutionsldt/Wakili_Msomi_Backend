@@ -280,6 +280,37 @@ textarea {
   margin-top: 16px;
 }
 
+/* Custom Scrollbar Styles */
+.conversation-list::-webkit-scrollbar,
+#messages-container::-webkit-scrollbar {
+  width: 8px;
+}
+
+.conversation-list::-webkit-scrollbar-track,
+#messages-container::-webkit-scrollbar-track {
+  background: var(--card-2);
+  border-radius: 4px;
+}
+
+.conversation-list::-webkit-scrollbar-thumb,
+#messages-container::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+  transition: background 0.2s ease;
+}
+
+.conversation-list::-webkit-scrollbar-thumb:hover,
+#messages-container::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+/* Firefox scrollbar styles */
+.conversation-list,
+#messages-container {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) var(--card-2);
+}
+
 /* Responsive */
 @media (max-width: 900px) {
   .container {

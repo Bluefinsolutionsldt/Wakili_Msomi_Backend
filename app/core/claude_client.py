@@ -21,48 +21,48 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
+# --- Shared instances initialized once ---
+CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY")
+if not CLAUDE_API_KEY:
+    raise ValueError("CLAUDE_API_KEY environment variable not set")
+
+# Redis cache
+CACHE_TTL_HOURS = int(os.getenv("CACHE_TTL_HOURS", "24"))
+REDIS_URL = os.getenv("REDIS_URL")
+redis_cache = None
+if REDIS_URL:
+    try:
+        redis_cache = Redis.from_url(REDIS_URL, decode_responses=True)
+        redis_cache.ping()
+        logger.info("Redis cache initialized successfully")
+    except (ConnectionError, Exception) as e:
+        logger.warning(f"Redis cache initialization failed: {str(e)}")
+        redis_cache = None
+else:
+    logger.info("Redis URL not configured, running without cache")
+
+# Claude client
+try:
+    claude_client = Anthropic(api_key=CLAUDE_API_KEY)
+    CLAUDE_MODEL = "claude-sonnet-4-20250514"
+    logger.info("Claude client initialized successfully")
+except Exception as e:
+    logger.error(f"Error initializing Claude client: {str(e)}")
+    raise
+
+# Offline processor and conversation store
+offline_processor = OfflineProcessor()
+conversation_store = ConversationStore(redis_url=REDIS_URL)
+
 class ClaudeClient:
     def __init__(self):
-        """Initialize Claude client with optional Redis caching"""
-        self.api_key = os.getenv("CLAUDE_API_KEY")
-        if not self.api_key:
-            raise ValueError("CLAUDE_API_KEY environment variable not set")
-            
-        # Initialize Redis connection if configured
-        self.cache = None
-        self.cache_ttl = int(os.getenv("CACHE_TTL_HOURS", "24"))
-        
-        redis_url = os.getenv("REDIS_URL")
-        if redis_url:
-            try:
-                self.cache = Redis.from_url(redis_url, decode_responses=True)
-                # Test connection
-                self.cache.ping()
-                logger.info("Redis cache initialized successfully")
-            except (ConnectionError, Exception) as e:
-                logger.warning(f"Redis cache initialization failed: {str(e)}")
-                self.cache = None
-        else:
-            logger.info("Redis URL not configured, running without cache")
-            
-        try:
-            self.client = Anthropic(api_key=self.api_key)
-            self.model = "claude-sonnet-4-20250514"
-            self.current_language = "en"  # Default language
-            logger.info("Claude client initialized successfully")
-        except Exception as e:
-            logger.error(f"Error initializing Claude client: {str(e)}")
-            raise
-
-        # Initialize offline processor
-        try:
-            self.offline_processor = OfflineProcessor()
-            logger.info("Offline processor initialized successfully")
-        except Exception as e:
-            logger.error(f"Error initializing offline processor: {str(e)}")
-            raise
-
-        self.conversation_store = ConversationStore(redis_url=os.getenv("REDIS_URL"))
+        # Simply connect to the shared instances
+        self.client = claude_client
+        self.model = CLAUDE_MODEL
+        self.cache = redis_cache
+        self.cache_ttl = CACHE_TTL_HOURS
+        self.offline_processor = offline_processor
+        self.conversation_store = conversation_store
 
     async def get_response(
         self, 
@@ -104,7 +104,8 @@ class ClaudeClient:
             user_message = Message(
                 role=MessageRole.USER,
                 content=prompt,
-                message_type=MessageType.TEXT
+                message_type=MessageType.TEXT,
+                created_at=datetime.now()
             )
             await self.conversation_store.add_message(username, conversation_id, user_message)
 
@@ -164,19 +165,13 @@ class ClaudeClient:
             ai_message = Message(
                 role=MessageRole.ASSISTANT,
                 content=response_content,
-                message_type=MessageType.TEXT
+                message_type=MessageType.TEXT,
+                created_at=datetime.now()
             )
             await self.conversation_store.add_message(username, conversation_id, ai_message)
 
             result = {
-                "response": response_content,
-                "conversation_id": conversation_id,
-                "model": self.model,
-                "confidence_score": 0.95,  # Default confidence score for Claude responses
-                "usage": {
-                    "input_tokens": len(prompt) // 4,
-                    "output_tokens": len(response_content) // 4
-                }
+                "response": response_content
             }
 
             return result
