@@ -1,18 +1,16 @@
-"""
-Claude API Integration for Sheria Kiganjani
-"""
 import os
 import logging
 import json
 import hashlib
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Any
+import asyncio
 from datetime import timedelta, datetime
 from redis.exceptions import ConnectionError
 
-from anthropic import Anthropic
+# Original imports - ensure these are correctly installed and structured in your project
+from anthropic import Anthropic, APIError
 from redis import Redis
 from dotenv import load_dotenv
-from .offline_processor import OfflineProcessor  
 from .conversation_store import ConversationStore, Message, MessageRole, MessageType
 
 # Configure logging
@@ -33,7 +31,9 @@ redis_cache = None
 if REDIS_URL:
     try:
         redis_cache = Redis.from_url(REDIS_URL, decode_responses=True)
-        redis_cache.ping()
+        # In a real async app, if using a synchronous Redis client like redis-py,
+        # ensure this ping doesn't block the event loop or use an async Redis client.
+        redis_cache.ping() 
         logger.info("Redis cache initialized successfully")
     except (ConnectionError, Exception) as e:
         logger.warning(f"Redis cache initialization failed: {str(e)}")
@@ -43,7 +43,7 @@ else:
 
 # Claude client
 try:
-    claude_client = Anthropic(api_key=CLAUDE_API_KEY)
+    claude_client_instance = Anthropic(api_key=CLAUDE_API_KEY)
     CLAUDE_MODEL = "claude-sonnet-4-20250514"
     logger.info("Claude client initialized successfully")
 except Exception as e:
@@ -51,42 +51,39 @@ except Exception as e:
     raise
 
 # Offline processor and conversation store
-offline_processor = OfflineProcessor()
 conversation_store = ConversationStore(redis_url=REDIS_URL)
 
 class ClaudeClient:
     def __init__(self):
-        # Simply connect to the shared instances
-        self.client = claude_client
+        self.client = claude_client_instance
         self.model = CLAUDE_MODEL
         self.cache = redis_cache
         self.cache_ttl = CACHE_TTL_HOURS
-        self.offline_processor = offline_processor
         self.conversation_store = conversation_store
 
-    async def get_response(
+    async def get_response( # This is the modified method, now an async generator
         self, 
         prompt: str, 
         conversation_id: Optional[str] = None,
         system_prompt: Optional[str] = None,
         language: str = "en",
-        use_offline: bool = False,
         verbose: bool = False,
         username: Optional[str] = None
-    ) -> Dict:
-        """Get response with conversation context"""
+    ):
+        """
+        Get streaming response with conversation context.
+        This method now yields chunks of the response.
+        """
         try:
-            logger.info(f"Processing request - conversation_id: {conversation_id}, language: {language}")
+            logger.info(f"Processing streaming request - conversation_id: {conversation_id}, language: {language}")
             
             # Validate jurisdiction focus
             if not self._validate_query_jurisdiction(prompt):
-                logger.info("Query jurisdiction validation failed")
-                return {
-                    "response": "I apologize, but I can only provide information about Tanzanian law. For legal matters in other jurisdictions, please consult appropriate legal professionals in those countries.",
-                    "conversation_id": conversation_id,
-                    "model": self.model,
+                yield {
+                    "response_chunk": "I apologize, but I can only provide information about Tanzanian law. For legal matters in other jurisdictions, please consult appropriate legal professionals in those countries.",
                     "jurisdiction_error": True
                 }
+                return # Exit the generator
 
             # Get or create conversation
             if conversation_id:
@@ -121,95 +118,161 @@ class ClaudeClient:
                         "content": msg.content
                     })
 
-            # Try offline mode if requested
-            if use_offline:
-                logger.info("Attempting offline response")
-                offline_response = await self.offline_processor.get_offline_response(
-                    query=prompt,
-                    language=language,
-                    context_messages=recent_messages
-                )
-                if offline_response:
-                    logger.info("Using offline response")
+            # Use Claude API with retry and fallback logic
+            max_retries = 3
+            retry_delay = 2  # seconds
+            stream = None
+            for attempt in range(max_retries):
+                try:
+                    logger.info(f"Calling Claude API for streaming (attempt {attempt + 1}/{max_retries})")
+                    final_prompt_content = prompt
+                    if not verbose:
+                        final_prompt_content = f"Provide a direct and concise answer: {prompt}"
+
+                    stream = self.client.messages.create(
+                        model=self.model,
+                        max_tokens=2000,
+                        temperature=0.7,
+                        system=system_prompt or self._get_default_system_prompt(language),
+                        messages=context_messages + [{"role": "user", "content": final_prompt_content}],
+                        stream=True
+                    )
+                    # If call is successful, break the retry loop
+                    break
+                except APIError as e:
+                    logger.warning(f"Claude API error on attempt {attempt + 1}: {e}")
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(retry_delay)
+                    else:
+                        logger.error("Claude API failed after multiple retries. Attempting fallback to non-streaming.")
+                        stream = None # Ensure stream is None to trigger fallback
+            
+            if stream is None:
+                # Fallback to a non-streaming call
+                try:
+                    logger.info("Attempting non-streaming Claude API call as fallback.")
+                    final_prompt_content = prompt
+                    if not verbose:
+                        final_prompt_content = f"Provide a direct and concise answer: {prompt}"
+                    
+                    response = self.client.messages.create(
+                        model=self.model,
+                        max_tokens=2000,
+                        temperature=0.7,
+                        system=system_prompt or self._get_default_system_prompt(language),
+                        messages=context_messages + [{"role": "user", "content": final_prompt_content}],
+                        stream=False
+                    )
+                    
+                    full_response_content = response.content[0].text
+                    yield {"response_chunk": self._filter_response_content(full_response_content)}
+                    
                     ai_message = Message(
                         role=MessageRole.ASSISTANT,
-                        content=offline_response["content"],
-                        message_type=MessageType.TEXT
+                        content=self._filter_response_content(full_response_content),
+                        message_type=MessageType.TEXT,
+                        created_at=datetime.now()
                     )
                     await self.conversation_store.add_message(username, conversation_id, ai_message)
-                    return {**offline_response, "conversation_id": conversation_id}
+                    
+                    yield {
+                        "status": "complete_fallback",
+                        "conversation_id": conversation_id,
+                        "model": self.model,
+                        "processed_at": datetime.now().isoformat(),
+                        "confidence_score": 0.90 # Slightly lower confidence for fallback
+                    }
+                    return
+                except APIError as e:
+                    logger.error(f"Non-streaming fallback also failed: {e}")
+                    yield {"error": "API fallback failed", "detail": "The service is currently experiencing issues, and the fallback mechanism also failed. Please try again later."}
+                    return
 
-            # Use Claude API with correct message format
-            logger.info("Calling Claude API")
-            if verbose:
-                response = self.client.messages.create(
-                    model=self.model,
-                    max_tokens=2000,
-                    temperature=0.7,
-                    system=system_prompt or self._get_default_system_prompt(language),
-                    messages=context_messages + [{"role": "user", "content": prompt}]
-                )
+            # The key change for streaming is 'stream=True'. The client may return either
+            # an async iterable or a synchronous iterator-like 'Stream' object. Support
+            # both by detecting __aiter__ and falling back to iterating the sync iterator
+            # inside a thread executor to avoid blocking the event loop.
+            full_response_content = ""
+
+            # Helper to iterate a synchronous iterator in an async-friendly way
+            async def _aiter_from_sync(sync_iter):
+                loop = asyncio.get_event_loop()
+                iterator = iter(sync_iter)
+                def get_next():
+                    try:
+                        return next(iterator)
+                    except StopIteration:
+                        return None
+                while True:
+                    chunk = await loop.run_in_executor(None, get_next)
+                    if chunk is None:
+                        break
+                    yield chunk
+
+            # Choose iteration strategy depending on the object
+            if hasattr(stream, "__aiter__"):
+                iterator = stream
             else:
-                response = self.client.messages.create(
-                    model=self.model,
-                    max_tokens=2000,
-                    temperature=0.7,
-                    system=system_prompt or self._get_default_system_prompt(language),
-                    messages=context_messages + [{"role": "user", "content": f"Provide a direct and concise answer: {prompt}"}]
-                )
+                # Fallback: treat as synchronous iterator
+                iterator = _aiter_from_sync(stream)
 
-            logger.info("Processing Claude API response")
-            response_content = self._filter_response_content(response.content[0].text)
-            
-            logger.info("Saving assistant response")
-            ai_message = Message(
-                role=MessageRole.ASSISTANT,
-                content=response_content,
-                message_type=MessageType.TEXT,
-                created_at=datetime.now()
-            )
-            await self.conversation_store.add_message(username, conversation_id, ai_message)
-
-            result = {
-                "response": response_content
-            }
-
-            return result
+            async for chunk in iterator:
+                if getattr(chunk, "type", None) == "content_block_delta" and getattr(getattr(chunk, "delta", None), "type", None) == "text_delta":
+                    text_chunk = chunk.delta.text
+                    full_response_content += text_chunk
+                    yield {"response_chunk": self._filter_response_content(text_chunk)}
+                elif getattr(chunk, "type", None) == "message_stop":
+                    # Save the full accumulated response to conversation history
+                    ai_message = Message(
+                        role=MessageRole.ASSISTANT,
+                        content=self._filter_response_content(full_response_content),
+                        message_type=MessageType.TEXT,
+                        created_at=datetime.now()
+                    )
+                    await self.conversation_store.add_message(username, conversation_id, ai_message)
+                    
+                    # Yield a final chunk indicating completion and including metadata
+                    yield {
+                        "status": "complete", 
+                        "conversation_id": conversation_id, 
+                        "model": self.model,
+                        "processed_at": datetime.now().isoformat(),
+                        "confidence_score": 0.95 # Placeholder, adjust as needed
+                    }
+                # You might handle other chunk types (e.g., tool_use, thinking_delta) here
+                # if your client needs to respond to them. For basic text streaming, text_delta is primary.
 
         except Exception as e:
-            logger.error(f"API request error: {str(e)}")
-            raise
+            logger.error(f"API request error during streaming: {str(e)}")
+            yield {"error": str(e), "detail": "An error occurred during response generation."}
 
-    async def process_query(
+    async def process_query( # This is the modified method, now an async generator
         self,
         query: str,
         language: str = "en",
         conversation_id: Optional[str] = None,
-        use_offline: bool = False,
-        username: Optional[str] = None
-    ) -> str:
-        """Process a legal query and return the response"""
+        username: Optional[str] = None,
+        verbose: bool = False # Added verbose for consistency
+    ):
+        """
+        Process a legal query and yield streaming responses.
+        This method now acts as an async generator, relaying chunks from get_response.
+        """
         try:
-            response = await self.get_response(
+            # The actual streaming logic is in get_response, which this method calls and relays.
+            async for chunk in self.get_response(
                 prompt=query,
                 conversation_id=conversation_id,
                 language=language,
-                use_offline=use_offline,
+                verbose=verbose,
                 username=username
-            )
-            
-            if "jurisdiction_error" in response:
-                return response["response"]
-                
-            # Get the response content and filter it
-            content = response.get("response", "")
-            filtered_content = self._filter_response_content(content)
-            
-            return filtered_content
+            ):
+                yield chunk # Yield each chunk as received
             
         except Exception as e:
-            logger.error(f"Error processing query: {str(e)}")
-            raise
+            logger.error(f"Error relaying streaming query: {str(e)}")
+            # If an error prevents the stream from starting or continuing, yield an error chunk
+            yield {"error": str(e), "detail": "Failed to process query for streaming."}
 
     def _get_default_system_prompt(self, language: str = "en") -> str:
         """Get the default system prompt based on language"""
@@ -248,11 +311,9 @@ Muhimu:
 
     def _filter_response_content(self, content: str) -> str:
         """Filter response content to maintain identity and jurisdiction focus"""
-        # Replace company identifiers
         content = content.replace("Claude", "Sheria Kiganjani")
         content = content.replace("Anthropic", "Sheria Kiganjani")
         
-        # Add jurisdiction disclaimer if other countries are mentioned
         countries = ["Kenya", "Uganda", "Rwanda", "Burundi", "South Sudan"]
         if any(country in content for country in countries):
             disclaimer = "\n\nPlease note: I specialize in Tanzanian law only. For legal matters in other countries, please consult legal professionals in those jurisdictions."
@@ -273,26 +334,11 @@ Muhimu:
         self,
         document_text: str,
         language: str = "en",
-        document_type: Optional[str] = None,
-        use_offline: bool = False  
+        document_type: Optional[str] = None
     ) -> Dict:
-        """Process a legal document using Claude with offline support"""
+        """Process a legal document using Claude with offline support (non-streaming by default)"""
         try:
-            # Only check offline if explicitly requested
-            if use_offline:
-                logger.info("Attempting to use offline response for document")
-                offline_response = await self.offline_processor.get_offline_response(
-                    query=document_text,
-                    language=language,
-                    doc_type=document_type
-                )
-                if offline_response:
-                    logger.info("Using offline response for document")
-                    return offline_response
-                logger.warning("No offline response available")
-                raise ValueError("No offline response available")
-
-            # If online, use Claude API directly
+            # If online, use Claude API directly (non-streaming for documents)
             logger.info(f"Processing document with Claude API: type={document_type}, language={language}")
             
             system_prompt = f"""
@@ -323,25 +369,18 @@ Muhimu:
                 max_tokens=1000,
                 temperature=0.7,
                 messages=messages,
-                system=system_prompt
+                system=system_prompt,
+                stream=False # Document processing usually not streamed unless explicitly asked
             )
             
             result = {
                 "content": response.content[0].text,
                 "model": self.model,
                 "usage": {
-                    "input_tokens": len(document_text) // 4,
-                    "output_tokens": len(response.content[0].text) // 4
+                    "input_tokens": len(document_text) // 4, # Estimate, real API provides exact
+                    "output_tokens": len(response.content[0].text) // 4 # Estimate, real API provides exact
                 }
             }
-            
-            # Store for offline use
-            await self.offline_processor.save_response(
-                query=document_text,
-                response=result,
-                language=language,
-                doc_type=document_type
-            )
             
             logger.info("Successfully processed document with Claude API")
             return result
@@ -350,6 +389,48 @@ Muhimu:
             logger.error(f"Error processing legal document: {str(e)}")
             raise
 
+    def _get_cache_key(self, text: str, language: str, doc_type: Optional[str] = None) -> str:
+        """Generate a consistent cache key."""
+        key_string = f"{text}:{language}:{doc_type or ''}"
+        return f"claude_cache:{hashlib.md5(key_string.encode()).hexdigest()}"
+
+    def _is_cache_valid(self, cached_item: Dict) -> bool:
+        """Check if a cached item is still valid."""
+        if not isinstance(cached_item, dict) or "timestamp" not in cached_item:
+            return False
+        
+        timestamp = datetime.fromisoformat(cached_item["timestamp"])
+        return (datetime.now() - timestamp) < timedelta(hours=self.cache_ttl)
+    
+    # --- Offline Model Management ---
+    # The following methods are placeholders for a more robust offline model management system.
+    # In a real-world scenario, these would interact with a proper database and training pipeline.
+    
+    async def get_offline_responses_for_training(self, language: str, doc_type: Optional[str] = None) -> List[Dict]:
+        """Fetch all cached/stored responses for a given language/type to be used for training."""
+        # This is a placeholder. In a real system, you'd query your database of stored interactions.
+        logger.warning("get_offline_responses_for_training is a placeholder and not implemented.")
+        return []
+
+    async def get_last_training_time(self, language: str, doc_type: Optional[str] = None) -> Optional[datetime]:
+        """Get the last time the offline model was trained."""
+        # Placeholder. This would read from a database or metadata file.
+        logger.warning("get_last_training_time is a placeholder and not implemented.")
+        return None
+
+    async def update_last_training_time(self, language: str, doc_type: Optional[str] = None):
+        """Update the last training time for the offline model."""
+        # Placeholder. This would write to a database or metadata file.
+        logger.warning("update_last_training_time is a placeholder and not implemented.")
+        pass
+
+    async def force_offline_training(self, language: str, doc_type: Optional[str] = None):
+        """Manually trigger the offline model training process."""
+        logger.info(f"Forcing offline training for language='{language}', doc_type='{doc_type}'")
+        await self.offline_processor.train_offline_model(language, doc_type)
+        logger.info("Offline training process completed.")
+
+
     async def _train_offline_model_if_needed(
         self, 
         language: str, 
@@ -357,11 +438,9 @@ Muhimu:
     ):
         """Periodically train the offline model"""
         try:
-            # Get the last training time from the database
             last_training = await self.offline_processor.get_last_training_time(language, doc_type)
             current_time = datetime.now()
             
-            # Train if never trained or if it's been more than 24 hours
             if not last_training or (current_time - last_training).total_seconds() > 86400:
                 logger.info("Training offline model...")
                 await self.offline_processor.train_offline_model(language, doc_type)
@@ -396,7 +475,6 @@ Muhimu:
         
         return results
     
-
     async def force_offline_training(
         self,
         language: Optional[str] = None,
@@ -413,4 +491,3 @@ Muhimu:
         except Exception as e:
             logger.error(f"Error during forced offline training: {str(e)}")
             raise
-        

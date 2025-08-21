@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException, Depends, Request, status, UploadFile, File, Query, Body, Header
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -22,7 +22,7 @@ from .auth import get_current_user, get_current_user_optional
 from ..core.conversation_store import ConversationStore, Conversation, Message, MessageRole, MessageType
 from app.core.claude_client import ClaudeClient
 from ..redis_db import get_redis
-from ..auth_utils import create_user_data, verify_password
+from ..auth_utils import create_user_data, verify_password, decrement_free_messages
 from ..services.ledger import log_payment, verify_duplicate_payment
 
 # Load environment variables
@@ -81,6 +81,8 @@ class QueryRequest(BaseModel):
     query: str
     conversation_id: str
     language: Optional[str] = "sw"
+    use_offline: Optional[bool] = False  # Field for offline mode
+    verbose: Optional[bool] = False      # Field for verbose output
 
 class MessageResponse(BaseModel):
     """Response model for messages"""
@@ -355,12 +357,12 @@ async def list_conversations(current_user: Dict[str, Any] = Depends(get_current_
                 "language": conv.language,
                 "messages": [
                     {
-                        "role": msg.role,
-                        "content": msg.content,
-                        "timestamp": msg.timestamp
-                    } for msg in conv.messages
-                ],
-                "metadata": conv.metadata
+                        "role": conv.messages[1].role,
+                        "content": conv.messages[1].content,
+                        "timestamp": conv.messages[1].timestamp
+                    }
+                ] if len(conv.messages) > 1 else [],
+                 "metadata": conv.metadata
             }
             for conv in conversations
         ]
@@ -621,44 +623,54 @@ async def validate_query_access(
         }
     )
 
-@app.post("/query", response_model=QueryResponse)
+@app.post("/query")
 async def process_query(
     request: QueryRequest,
     current_user: Dict[str, Any] = Depends(validate_query_access),
     claude_client: ClaudeClient = Depends(get_claude_client),
     redis: Redis = Depends(get_redis)
 ):
-    """Process a query in the context of a conversation"""
-    try:
-        if not request.conversation_id:
-            raise HTTPException(status_code=400, detail="conversation_id is required")
-        
-        # Process query with Claude
-        response_content = await claude_client.process_query(
-            request.query,
-            language=request.language,
-            conversation_id=request.conversation_id,
-            username=current_user["username"]
-        )
+    """
+    Processes a query in the context of a conversation, returning a streaming response
+    using Server-Sent Events (SSE).
+    """
+    if not request.conversation_id:
+        raise HTTPException(status_code=400, detail="conversation_id is required")
 
-        # Decrement free messages if user is using free access
-        if current_user.get("access_type") == "free_messages":
-            from ..auth_utils import decrement_free_messages
-            await decrement_free_messages(current_user["username"], redis)
-        
-        return {
-            "response": response_content,
-            "conversation_id": request.conversation_id,
-            "language": request.language,
-            "confidence_score": 0.95,
-            "processed_at": datetime.now().isoformat()
+    async def generate_response_chunks():
+        try:
+            # Decrement free messages if the user is on a free plan
+            if current_user.get("access_type") == "free_messages":
+                await decrement_free_messages(current_user["username"], redis)
+                logger.info(f"Free message decremented for user: {current_user['username']}")
+
+            # Call claude_client.process_query with explicit parameters
+            async for chunk_data in claude_client.process_query(
+                query=request.query,
+                conversation_id=request.conversation_id,
+                language=request.language,
+                username=current_user["username"],
+                verbose=False
+            ):
+                # Format as proper SSE
+                yield f"data: {json.dumps(chunk_data)}\n\n"
+
+        except AttributeError as e:
+            logger.error(f"AttributeError in streaming endpoint: {str(e)}")
+            yield f"data: {json.dumps({'error': 'Invalid request format', 'detail': str(e)})}\n\n"
+        except Exception as e:
+            logger.error(f"Unexpected error in FastAPI streaming endpoint: {str(e)}")
+            yield f"data: {json.dumps({'error': str(e), 'detail': 'An unexpected server error occurred during streaming.'})}\n\n"
+
+    return StreamingResponse(
+        generate_response_chunks(),
+        media_type="text/event-stream",
+        headers={
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no'
         }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error processing query: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+    )
 
 
 @app.get("/users/{username}/payments")

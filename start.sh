@@ -6,7 +6,7 @@ set -a
 set +a
 
 # Default port if not set in environment
-PORT="${PORT:-8001}"
+PORT="${PORT:-8007}"
 HOST="${HOST:-0.0.0.0}"
 
 # Start the application

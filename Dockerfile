@@ -15,11 +15,11 @@ COPY . .
 RUN chmod +x start.sh
 
 # Set environment variables
-ENV PORT=8001
+ENV PORT=8007
 ENV HOST=0.0.0.0
 
 # Expose the port
-EXPOSE 8001
+EXPOSE 8007
 
 # Command to run the application
 CMD ["./start.sh"]
