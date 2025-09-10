@@ -24,6 +24,7 @@ from app.core.claude_client import ClaudeClient
 from ..redis_db import get_redis
 from ..auth_utils import create_user_data, verify_password, decrement_free_messages
 from ..services.ledger import log_payment, verify_duplicate_payment
+from .whatsapp import router as whatsapp_router
 
 # Load environment variables
 load_dotenv()
@@ -56,6 +57,9 @@ app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 # Setup templates
 templates = Jinja2Templates(directory="app/templates")
+
+# Include routers
+app.include_router(whatsapp_router)
 
 # Constants
 SECRET_KEY = os.getenv("JWT_SECRET")

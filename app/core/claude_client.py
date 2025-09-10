@@ -118,6 +118,11 @@ class ClaudeClient:
                         "content": msg.content
                     })
 
+            # Log the loaded conversation context before sending to AI
+            logger.info(f"Loaded conversation context for {conversation_id} (user: {username}):")
+            for i, msg in enumerate(context_messages):
+                logger.info(f"  [{i}] {msg['role']}: {msg['content']}")
+
             # Use Claude API with retry and fallback logic
             max_retries = 3
             retry_delay = 2  # seconds
