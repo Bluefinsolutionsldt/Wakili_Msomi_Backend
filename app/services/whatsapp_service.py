@@ -8,6 +8,12 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from app.core.claude_client import ClaudeClient
 from app.config import settings
 
+import os
+from dotenv import load_dotenv
+
+
+load_dotenv()
+
 logger = logging.getLogger(__name__)
 
 class WhatsAppService:
@@ -346,9 +352,9 @@ For complex legal matters, consider consulting with a qualified lawyer."""
             payment_url = await self._generate_payment_url(wa_id, plan)
             
             plan_info = {
-                "daily": {"price": "TZS 7,500", "duration": "24 hours"},
-                "weekly": {"price": "TZS 20,000", "duration": "7 days"},
-                "monthly": {"price": "TZS 50,000", "duration": "30 days"}
+                "daily": {"price": "TZS 1000", "duration": "24 hours"},
+                "weekly": {"price": "TZS 5000", "duration": "7 days"},
+                "monthly": {"price": "TZS 20000", "duration": "30 days"}
             }
             
             if payment_url:
@@ -533,14 +539,33 @@ However, you can copy and paste the text content of your document here, and I'll
                     current_count = await redis_client.get(count_key)
                     current_count = int(current_count) if current_count else 0
                     
-                    # Check if user has paid subscription
+                    # Check if user has paid subscription and if it's still valid
                     subscription_key = f"whatsapp_subscription:{wa_id}"
-                    has_subscription = await redis_client.get(subscription_key)
+                    subscription_data = await redis_client.get(subscription_key)
                     
-                    # Free limit is 5 messages per day
-                    FREE_MESSAGE_LIMIT = 5
+                    has_active_subscription = False
+                    if subscription_data:
+                        try:
+                            import json
+                            from datetime import datetime
+                            subscription = json.loads(subscription_data)
+                            expires_at = subscription.get("expires_at")
+                            if expires_at:
+                                expiry_date = datetime.fromisoformat(expires_at)
+                                has_active_subscription = datetime.now() < expiry_date
+                                if not has_active_subscription:
+                                    # Subscription expired, remove it
+                                    await redis_client.delete(subscription_key)
+                                    self.logger.info(f"Removed expired WhatsApp subscription for {wa_id}")
+                        except (json.JSONDecodeError, ValueError) as e:
+                            self.logger.error(f"Error parsing subscription data for {wa_id}: {e}")
+                            # If we can't parse the subscription, treat as no subscription
+                            has_active_subscription = False
                     
-                    return current_count >= FREE_MESSAGE_LIMIT and not has_subscription
+                    # Free limit is 10 messages per day
+                    FREE_MESSAGE_LIMIT = 10
+                    
+                    return current_count >= FREE_MESSAGE_LIMIT and not has_active_subscription
         except Exception as e:
             self.logger.error(f"Error checking message limit: {e}")
         return False
@@ -564,7 +589,7 @@ However, you can copy and paste the text content of your document here, and I'll
             greeting_name = contact_name if contact_name else "there"
             
             # Send interactive message with Flow trigger
-            message = f"""📱 Habari {greeting_name}! You've reached your daily free message limit (5 messages).
+            message = f"""📱 Habari {greeting_name}! You've reached your daily free message limit (10 messages).
 
 To continue chatting with Wakili Msomi, please select a subscription plan:"""
 
@@ -608,9 +633,9 @@ To continue chatting with Wakili Msomi, please select a subscription plan:"""
                                 "data": {
                                     "user_phone": wa_id,
                                     "plans": [
-                                        {"id": "daily", "name": "Daily", "price": "TZS 7,500", "duration": "24 hours"},
-                                        {"id": "weekly", "name": "Weekly", "price": "TZS 20,000", "duration": "7 days"},
-                                        {"id": "monthly", "name": "Monthly", "price": "TZS 50,000", "duration": "30 days"}
+                                        {"id": "daily", "name": "Daily", "price": "TZS 1000", "duration": "24 hours"},
+                                        {"id": "weekly", "name": "Weekly", "price": "TZS 5,000", "duration": "7 days"},
+                                        {"id": "monthly", "name": "Monthly", "price": "TZS 20,000", "duration": "30 days"}
                                     ]
                                 }
                             }
@@ -652,9 +677,9 @@ To continue chatting with Wakili Msomi, please select a subscription plan:"""
                         "text": f"""{message}
 
 💰 *Payment Options:*
-📅 Daily: TZS 7,500 (24 hours)
-📅 Weekly: TZS 20,000 (7 days) 
-📅 Monthly: TZS 50,000 (30 days)
+📅 Daily: TZS 1,000 (24 hours)
+📅 Weekly: TZS 5,000 (7 days) 
+📅 Monthly: TZS 20,000 (30 days)
 
 Please select your preferred plan:"""
                     },
@@ -667,21 +692,21 @@ Please select your preferred plan:"""
                                 "type": "reply",
                                 "reply": {
                                     "id": "pay_weekly",
-                                    "title": "Weekly - 20,000 TZS"
+                                    "title": "Weekly - 5,000 TZS"
                                 }
                             },
                             {
                                 "type": "reply",
                                 "reply": {
                                     "id": "pay_monthly",
-                                    "title": "Monthly - 50,000 TZS"
+                                    "title": "Monthly - 20,000 TZS"
                                 }
                             },
                             {
                                 "type": "reply",
                                 "reply": {
                                     "id": "pay_daily",
-                                    "title": "Daily - 7,500 TZS"
+                                    "title": "Daily - 1,000 TZS"
                                 }
                             }
                         ]
@@ -769,9 +794,9 @@ Please select your preferred plan:"""
             payment_url = await self._generate_payment_url(phone, plan)
             
             plan_info = {
-                "daily": {"price": "TZS 7,500", "duration": "24 hours"},
-                "weekly": {"price": "TZS 20,000", "duration": "7 days"},
-                "monthly": {"price": "TZS 50,000", "duration": "30 days"}
+                "daily": {"price": "TZS 1,000", "duration": "24 hours"},
+                "weekly": {"price": "TZS 5,000", "duration": "7 days"},
+                "monthly": {"price": "TZS 20,000", "duration": "30 days"}
             }
             
             if payment_url:
@@ -796,6 +821,39 @@ After successful payment, you'll get unlimited access to Wakili Msomi for {plan_
         except Exception as e:
             self.logger.error(f"Error handling flow submission: {e}")
             await self.send_message(wa_id, "❌ An error occurred while processing your payment request. Please try again.")
+
+    async def notify_subscription_activated(self, wa_id: str, plan: str, expires_at: str) -> None:
+        """Notify WhatsApp user that their subscription has been activated"""
+        try:
+            from datetime import datetime
+            
+            # Parse expiry date for display
+            expiry_date = datetime.fromisoformat(expires_at)
+            formatted_expiry = expiry_date.strftime("%B %d, %Y at %I:%M %p")
+            
+            plan_info = {
+                "daily": {"name": "Daily", "duration": "24 hours"},
+                "weekly": {"name": "Weekly", "duration": "7 days"},
+                "monthly": {"name": "Monthly", "duration": "30 days"}
+            }
+            
+            message = f"""🎉 *Payment Successful!*
+
+✅ Your {plan_info[plan]["name"]} subscription has been activated!
+
+📅 *Valid until:* {formatted_expiry}
+🎯 *Benefits:* Unlimited access to Wakili Msomi
+💬 *What's next:* Start asking your legal questions!
+
+Thank you for choosing Wakili Msomi! 🙏
+
+Type your legal question to get started. 💭"""
+
+            await self.send_message(wa_id, message)
+            self.logger.info(f"Subscription activation notification sent to {wa_id}")
+            
+        except Exception as e:
+            self.logger.error(f"Error sending subscription notification to {wa_id}: {e}")
 
 # Create singleton instance
 whatsapp_service = WhatsAppService()

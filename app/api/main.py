@@ -734,9 +734,9 @@ async def create_subscription_order(
 
     # Plan configuration
     plan_config = {
-        "daily": {"amount": 7500, "description": "24-hour access"},
-        "weekly": {"amount": 20000, "description": "7-day access"},
-        "monthly": {"amount": 50000, "description": "30-day access"}
+        "daily": {"amount": 1000, "description": "24-hour access"},
+        "weekly": {"amount": 5000, "description": "7-day access"},
+        "monthly": {"amount": 20000, "description": "30-day access"}
     }
 
     # Prepare payload for Selcom
@@ -868,9 +868,9 @@ async def validate_query_access(
             "message": "You have used all your free messages. Purchase a subscription for unlimited access.",
             "free_messages_remaining": 0,
             "available_plans": {
-                "daily": {"amount": 7500, "description": "24-hour access"},
-                "weekly": {"amount": 20000, "description": "7-day access"},
-                "monthly": {"amount": 50000, "description": "30-day access"}
+                "daily": {"amount": 1000, "description": "24-hour access"},
+                "weekly": {"amount": 5000, "description": "7-day access"},
+                "monthly": {"amount": 20000, "description": "30-day access"}
             }
         }
     )
@@ -894,9 +894,9 @@ async def get_free_messages_status(
         "subscription": subscription_status,
         "free_messages_remaining": free_messages,
         "available_plans": {
-            "daily": {"amount": 7500, "description": "24-hour access"},
-            "weekly": {"amount": 20000, "description": "7-day access"},
-            "monthly": {"amount": 50000, "description": "30-day access"}
+            "daily": {"amount": 1000, "description": "24-hour access"},
+            "weekly": {"amount": 5000, "description": "7-day access"},
+            "monthly": {"amount": 20000, "description": "30-day access"}
         }
     }
 
@@ -1019,35 +1019,90 @@ async def payment_webhook(
     if not order_data:
         return {"status": "error", "message": f"Order ID {order_id} not found"}
     order = json.loads(order_data)
-    username = order.get("username")
+    
+    # Check if this is a WhatsApp user or web user
+    user_type = order.get("user_type", "web")
     plan = order.get("plan")
-    if not username or not plan:
-        return {"status": "error", "message": "Order missing username or plan"}
+    
+    if user_type == "whatsapp":
+        # Handle WhatsApp user subscription
+        wa_id = order.get("wa_id")
+        if not wa_id or not plan:
+            return {"status": "error", "message": "WhatsApp order missing wa_id or plan"}
+        
+        # Set plan duration for WhatsApp user
+        from datetime import datetime, timedelta
+        durations = {
+            "daily": timedelta(days=1),
+            "weekly": timedelta(days=7),
+            "monthly": timedelta(days=30)
+        }
+        expires_at = (datetime.now() + durations[plan]).isoformat()
+        
+        # Store WhatsApp subscription
+        whatsapp_subscription_key = f"whatsapp_subscription:{wa_id}"
+        await redis.set(whatsapp_subscription_key, json.dumps({
+            "plan": plan,
+            "expires_at": expires_at,
+            "status": "active"
+        }))
+        
+        # Also reset the message count for this WhatsApp user
+        count_key = f"whatsapp_message_count:{wa_id}"
+        await redis.delete(count_key)
+        
+        logger.info(f"Activated WhatsApp subscription for {wa_id}: {plan} plan until {expires_at}")
+        
+        # Log payment for WhatsApp user
+        await log_payment(
+            redis=redis,
+            order_id=order_id,
+            username=f"whatsapp_{wa_id}",
+            amount=int(payload.get("amount", 0)),
+            plan=plan,
+            status="COMPLETED",
+            gateway_data=payload
+        )
+        
+        # Send WhatsApp notification to user
+        try:
+            from app.services.whatsapp_service import whatsapp_service
+            await whatsapp_service.notify_subscription_activated(wa_id, plan, expires_at)
+        except Exception as e:
+            logger.error(f"Failed to send WhatsApp notification to {wa_id}: {e}")
+        
+        return {"status": "success", "message": f"WhatsApp subscription activated for {wa_id}"}
+    
+    else:
+        # Handle regular web user subscription
+        username = order.get("username")
+        if not username or not plan:
+            return {"status": "error", "message": "Order missing username or plan"}
 
-    # Set plan duration
-    from datetime import datetime, timedelta
-    durations = {
-        "daily": timedelta(days=1),
-        "weekly": timedelta(days=7),
-        "monthly": timedelta(days=30)
-    }
-    expires_at = (datetime.now() + durations[plan]).isoformat()
-    subscription_key = f"user:{username}:subscription"
-    await redis.set(subscription_key, json.dumps({
-        "plan": plan,
-        "expires_at": expires_at
-    }))
+        # Set plan duration for web user
+        from datetime import datetime, timedelta
+        durations = {
+            "daily": timedelta(days=1),
+            "weekly": timedelta(days=7),
+            "monthly": timedelta(days=30)
+        }
+        expires_at = (datetime.now() + durations[plan]).isoformat()
+        subscription_key = f"user:{username}:subscription"
+        await redis.set(subscription_key, json.dumps({
+            "plan": plan,
+            "expires_at": expires_at
+        }))
 
-    # Log payment and mark transaction id
-    await log_payment(
-        redis=redis,
-        order_id=order_id,
-        username=username,
-        amount=int(payload.get("amount", 0)),
-        plan=plan,
-        status="COMPLETED",
-        gateway_data=payload
-    )
+        # Log payment and mark transaction id
+        await log_payment(
+            redis=redis,
+            order_id=order_id,
+            username=username,
+            amount=int(payload.get("amount", 0)),
+            plan=plan,
+            status="COMPLETED",
+            gateway_data=payload
+        )
 
     # Prevent re-use
     await redis.set(f"txn:{payload['transid']}", order_id)

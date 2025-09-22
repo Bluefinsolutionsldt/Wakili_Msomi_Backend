@@ -30,11 +30,11 @@ def create_user_data(password: str) -> Dict[str, Any]:
     }
 
 async def initialize_free_messages(username: str, redis) -> None:
-    """Initialize a new user with 3 free messages"""
+    """Initialize a new user with 10 free messages"""
     try:
         free_messages_key = f"user:{username}:free_messages"
-        await redis.set(free_messages_key, 3)
-        logger.info(f"Initialized 3 free messages for user: {username}")
+        await redis.set(free_messages_key, 10)
+        logger.info(f"Initialized 10 free messages for user: {username}")
     except Exception as e:
         logger.error(f"Error initializing free messages for {username}: {str(e)}")
 

@@ -1,7 +1,15 @@
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, Request, HTTPException, Depends
 from app.services.whatsapp_service import whatsapp_service
+from app.redis_db import get_redis
+from redis.asyncio import Redis
 import logging
+import os
 import base64
+import json
+from dotenv import load_dotenv
+
+
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +119,7 @@ async def handle_flow_endpoint(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/create-subscription-order")
-async def create_whatsapp_subscription_order(request: Request):
+async def create_whatsapp_subscription_order(request: Request, redis: Redis = Depends(get_redis)):
     """Create subscription order for WhatsApp users (no authentication required)"""
     try:
         import os
@@ -133,17 +141,28 @@ async def create_whatsapp_subscription_order(request: Request):
         
         # Plan configuration
         plan_config = {
-            "daily": {"amount": 7500, "description": "24-hour access to Wakili Msomi"},
-            "weekly": {"amount": 20000, "description": "7-day access to Wakili Msomi"},
-            "monthly": {"amount": 50000, "description": "30-day access to Wakili Msomi"}
+            "daily": {"amount": 1000, "description": "24-hour access to Wakili Msomi"},
+            "weekly": {"amount": 5000, "description": "7-day access to Wakili Msomi"},
+            "monthly": {"amount": 20000, "description": "30-day access to Wakili Msomi"}
         }
         
         # Prepare order
         order_id = f"wa_{str(phone)[-6:]}_{int(datetime.now().timestamp())}"
         
+        # Store order mapping for webhook processing (expires in 2 days)
+        order_data = {
+            "wa_id": str(phone),  # WhatsApp ID
+            "plan": plan,
+            "user_type": "whatsapp",  # Flag to identify WhatsApp users
+            "amount": plan_config[plan]["amount"],
+            "created_at": datetime.now().isoformat()
+        }
+        order_key = f"order:{order_id}"
+        await redis.set(order_key, json.dumps(order_data), ex=2*24*60*60)  # Expire in 2 days
+        
         # Prepare payload for Selcom
         payload = {
-            "vendor": os.getenv("PAYMENT_VENDOR_ID", "TILL60452976"),
+            "vendor": os.getenv("PAYMENT_VENDOR_ID"),
             "order_id": order_id,
             "buyer_email": f"whatsapp{phone}@wakilimsomi.app",
             "buyer_name": f"WhatsApp User {phone}",
@@ -174,7 +193,7 @@ async def create_whatsapp_subscription_order(request: Request):
             
             if response.status_code == 200:
                 result = response.json()
-                logger.info(f"WhatsApp payment order created: {order_id}")
+                logger.info(f"WhatsApp payment order created: {order_id} for WhatsApp user {phone}")
                 return {
                     "status": "success",
                     "order_id": order_id,
