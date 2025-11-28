@@ -160,9 +160,13 @@ async def create_whatsapp_subscription_order(request: Request, redis: Redis = De
         order_key = f"order:{order_id}"
         await redis.set(order_key, json.dumps(order_data), ex=2*24*60*60)  # Expire in 2 days
         
+        vendor = os.getenv("JSUITE_VENDOR") or os.getenv("PAYMENT_VENDOR_ID") or "TILL604529761"
+        if not vendor:
+            raise HTTPException(status_code=500, detail="JSuite vendor ID not configured")
+        
         # Prepare payload for Selcom
         payload = {
-            "vendor": os.getenv("PAYMENT_VENDOR_ID"),
+            "vendor": vendor,
             "order_id": order_id,
             "buyer_email": f"whatsapp{phone}@wakilimsomi.app",
             "buyer_name": f"WhatsApp User {phone}",
@@ -178,16 +182,13 @@ async def create_whatsapp_subscription_order(request: Request, redis: Redis = De
         }
         
         # Call Selcom API
-        headers = {
-            "Authorization": f"Bearer {os.getenv('PAYMENT_API_KEY')}",
-            "Content-Type": "application/json"
-        }
-        
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 "https://gateway.jsuite.app/checkout/create-order-minimal",
                 json=payload,
-                headers=headers,
+                headers={
+                    "Content-Type": "application/json"
+                },
                 timeout=30.0
             )
             

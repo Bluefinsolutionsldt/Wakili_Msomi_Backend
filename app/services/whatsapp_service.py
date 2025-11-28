@@ -733,21 +733,70 @@ Please select your preferred plan:"""
             import httpx
             import os
             import json
+            import base64
+            from datetime import datetime
             
-            # Call your backend's WhatsApp payment endpoint to create order first
-            base_url = os.getenv("SERVER_BASE_URL", "http://localhost:8007")
+            # Get Redis client for storing order
+            redis_client = None
+            if hasattr(self.claude_client, "conversation_store") and hasattr(self.claude_client.conversation_store, "redis"):
+                redis_client = self.claude_client.conversation_store.redis
             
-            # Step 1: Create subscription order
-            order_payload = {
+            # Plan configuration
+            plan_config = {
+                "daily": {"amount": 1000, "description": "24-hour access to Wakili Msomi"},
+                "weekly": {"amount": 5000, "description": "7-day access to Wakili Msomi"},
+                "monthly": {"amount": 20000, "description": "30-day access to Wakili Msomi"}
+            }
+            
+            if plan not in plan_config:
+                self.logger.error(f"Invalid plan: {plan}")
+                return False
+            
+            # Step 1: Create subscription order directly (no HTTP call to self)
+            order_id = f"wa_{str(wa_id)[-6:]}_{int(datetime.now().timestamp())}"
+            
+            # Store order mapping for webhook processing
+            order_data = {
+                "wa_id": str(wa_id),
                 "plan": plan,
-                "phone": int(wa_id)
+                "user_type": "whatsapp",
+                "amount": plan_config[plan]["amount"],
+                "created_at": datetime.now().isoformat()
+            }
+            
+            if redis_client:
+                order_key = f"order:{order_id}"
+                await redis_client.set(order_key, json.dumps(order_data), ex=2*24*60*60)
+                self.logger.info(f"Stored order {order_id} in Redis")
+            
+            # Prepare payload for JSuite create-order
+            base_url = os.getenv("BASE_URL", "https://localhost:8007")
+            vendor = os.getenv("JSUITE_VENDOR") or os.getenv("PAYMENT_VENDOR_ID") or "TILL604529761"
+            
+            if not vendor:
+                self.logger.error("JSUITE vendor ID not configured")
+                return False
+            
+            create_order_payload = {
+                "vendor": vendor,
+                "order_id": order_id,
+                "buyer_email": f"whatsapp{wa_id}@wakilimsomi.app",
+                "buyer_name": f"WhatsApp User {wa_id}",
+                "buyer_phone": str(wa_id),
+                "amount": plan_config[plan]["amount"],
+                "currency": "TZS",
+                "buyer_remarks": f"WhatsApp {plan} subscription - {plan_config[plan]['description']}",
+                "merchant_remarks": f"Wakili Msomi WhatsApp {plan} subscription",
+                "webhook": base64.b64encode(f"{base_url}/payment-webhook".encode()).decode(),
+                "no_of_items": 1
             }
             
             async with httpx.AsyncClient() as client:
-                # Create the subscription order
+                # Create the order with JSuite
+                self.logger.info(f"Creating JSuite order: {order_id}")
                 order_response = await client.post(
-                    f"{base_url}/whatsapp/create-subscription-order",
-                    json=order_payload,
+                    "https://gateway.jsuite.app/checkout/create-order-minimal",
+                    json=create_order_payload,
                     headers={
                         "Content-Type": "application/json"
                     },
@@ -755,21 +804,14 @@ Please select your preferred plan:"""
                 )
                 
                 if order_response.status_code != 200:
-                    self.logger.error(f"Order creation error: {order_response.status_code} - {order_response.text}")
+                    self.logger.error(f"JSuite order creation error: {order_response.status_code} - {order_response.text}")
                     return False
                 
                 order_result = order_response.json()
-                order_id = order_result.get("order_id")
-                
-                if not order_id:
-                    self.logger.error(f"No order_id returned from subscription order endpoint")
-                    return False
-                
-                self.logger.info(f"Created subscription order {order_id} for {wa_id}")
+                self.logger.info(f"JSuite order created: {order_result}")
                 
                 # Step 2: Trigger USSD push payment using the order_id
-                vendor = os.getenv("JSUITE_VENDOR", "TILL60452976")
-                transid = f"{vendor.replace('TILL', '')}_{order_id[-8:]}"  # Generate transaction ID
+                transid = f"{vendor.replace('TILL', '')}_{order_id[-8:]}"
                 
                 ussd_payload = {
                     "transid": transid,
@@ -777,6 +819,7 @@ Please select your preferred plan:"""
                     "msisdn": str(wa_id)
                 }
                 
+                self.logger.info(f"Triggering USSD payment: {ussd_payload}")
                 ussd_response = await client.post(
                     "https://gateway.jsuite.app/checkout/wallet-payment",
                     json=ussd_payload,
@@ -797,6 +840,8 @@ Please select your preferred plan:"""
             
         except Exception as e:
             self.logger.error(f"Error triggering USSD payment: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
             return False
 
     async def handle_flow_submission(self, wa_id: str, response_data: dict) -> None:
