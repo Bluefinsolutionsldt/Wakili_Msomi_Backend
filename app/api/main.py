@@ -224,6 +224,16 @@ async def root(request: Request):
 async def serve_app(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
 
+@app.get("/privacy-policy", response_class=HTMLResponse)
+async def privacy_policy(request: Request):
+    """Serve Privacy Policy page"""
+    return templates.TemplateResponse("privacy-policy.html", {"request": request})
+
+@app.get("/terms-conditions", response_class=HTMLResponse)
+async def terms_conditions(request: Request):
+    """Serve Terms and Conditions page"""
+    return templates.TemplateResponse("terms-conditions.html", {"request": request})
+
 @app.post("/process-document", 
     response_model=dict,
     tags=["Document Processing"],

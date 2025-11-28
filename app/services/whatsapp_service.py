@@ -218,7 +218,7 @@ class WhatsAppService:
             
             # Check for special commands
             if user_text.lower() in ["/start", "hello", "hi", "start"]:
-                welcome_message = f"""👋 Habari {greeting_name}! I'm Wakili Msomi, your AI legal assistant created by Bluefin Solutions.
+                welcome_message = f"""👋 Habari {greeting_name}! I'm Wakili Msomi, your AI legal assistant.
 
 I specialize in Tanzanian law and can help you with:
 📋 Legal questions and advice
@@ -325,8 +325,8 @@ Send me your question or document! 📩"""
                 elif button_id == "more_help":
                     help_message = """📚 Additional Resources:
 
-🌐 Visit: https://bluefinsolutions.co.tz
-📧 Contact: info@bluefinsolutions.co.tz
+🌐 Visit: https://sheriakiganjani.co.tz
+📧 Contact: 0621900555
 📱 WhatsApp: Continue chatting here!
 
 For complex legal matters, consider consulting with a qualified lawyer."""
@@ -344,34 +344,43 @@ For complex legal matters, consider consulting with a qualified lawyer."""
             self.logger.error(f"Error handling interactive message: {e}")
 
     async def _process_payment_selection(self, wa_id: str, plan: str, contact_name: Optional[str] = None) -> None:
-        """Process payment plan selection and generate payment link"""
+        """Process payment plan selection and trigger USSD push payment"""
         try:
             greeting_name = contact_name if contact_name else "there"
             
-            # Generate payment URL by calling your backend payment endpoint
-            payment_url = await self._generate_payment_url(wa_id, plan)
-            
             plan_info = {
-                "daily": {"price": "TZS 1000", "duration": "24 hours"},
-                "weekly": {"price": "TZS 5000", "duration": "7 days"},
-                "monthly": {"price": "TZS 20000", "duration": "30 days"}
+                "daily": {"price": "TZS 1,000", "duration": "24 hours"},
+                "weekly": {"price": "TZS 5,000", "duration": "7 days"},
+                "monthly": {"price": "TZS 20,000", "duration": "30 days"}
             }
             
-            if payment_url:
-                message = f"""✅ Great choice {greeting_name}! 
+            # Send initial message about payment processing
+            await self.send_message(
+                wa_id,
+                f"""⏳ Processing your payment request {greeting_name}...
 
 📋 *Selected Plan:* {plan.title()}
 💰 *Price:* {plan_info[plan]["price"]}
 ⏰ *Duration:* {plan_info[plan]["duration"]}
 
-🔗 *Complete your payment here:*
-{payment_url}
+You will receive a USSD push notification on your phone shortly. Please enter your PIN to complete the payment."""
+            )
+            
+            # Trigger USSD push payment
+            payment_triggered = await self._trigger_ussd_payment(wa_id, plan)
+            
+            if payment_triggered:
+                message = f"""📲 *Payment request sent!*
+
+A USSD prompt has been sent to your phone number (+{wa_id}).
+
+✅ Please check your phone and enter your mobile money PIN to complete the payment.
 
 After successful payment, you'll get unlimited access to Wakili Msomi for {plan_info[plan]["duration"]}!
 
-💡 Need help? Contact us at info@bluefinsolutions.co.tz"""
+💡 Didn't receive the prompt? Make sure you have sufficient balance and try again."""
             else:
-                message = f"""❌ Sorry {greeting_name}, we're having trouble generating your payment link.
+                message = f"""❌ Sorry {greeting_name}, we're having trouble processing your payment.
 
 Please try again later or contact us at info@bluefinsolutions.co.tz for assistance."""
             
@@ -391,18 +400,8 @@ Please try again later or contact us at info@bluefinsolutions.co.tz for assistan
             phone = flow_data.get("phone", wa_id)
             
             if plan:
-                # Generate payment URL with collected details
-                payment_url = await self._generate_payment_url(phone, plan)
-                
-                if payment_url:
-                    greeting_name = contact_name if contact_name else "there"
-                    message = f"""✅ Payment details received {greeting_name}!
-
-🔗 *Complete your payment here:*
-{payment_url}
-
-After successful payment, you'll get unlimited access to Wakili Msomi!"""
-                    await self.send_message(wa_id, message)
+                # Process payment using USSD push
+                await self._process_payment_selection(phone, plan, contact_name)
                 
         except Exception as e:
             self.logger.error(f"Error handling Flow response: {e}")
@@ -728,46 +727,77 @@ Please select your preferred plan:"""
         except Exception as e:
             self.logger.error(f"Error sending payment buttons: {e}")
 
-    async def _generate_payment_url(self, wa_id: str, plan: str = "weekly") -> Optional[str]:
-        """Generate payment URL by calling backend payment endpoint"""
+    async def _trigger_ussd_payment(self, wa_id: str, plan: str = "weekly") -> bool:
+        """Create subscription order and trigger USSD push payment"""
         try:
             import httpx
             import os
             import json
             
-            # Call your backend's WhatsApp payment endpoint
+            # Call your backend's WhatsApp payment endpoint to create order first
             base_url = os.getenv("SERVER_BASE_URL", "http://localhost:8007")
             
-            # Prepare payload for your WhatsApp create-subscription-order endpoint
-            payload = {
+            # Step 1: Create subscription order
+            order_payload = {
                 "plan": plan,
                 "phone": int(wa_id)
             }
             
-            # Call the WhatsApp-specific payment endpoint (no authentication required)
             async with httpx.AsyncClient() as client:
-                response = await client.post(
+                # Create the subscription order
+                order_response = await client.post(
                     f"{base_url}/whatsapp/create-subscription-order",
-                    json=payload,
+                    json=order_payload,
                     headers={
                         "Content-Type": "application/json"
                     },
                     timeout=30.0
                 )
                 
-                if response.status_code == 200:
-                    result = response.json()
-                    # Extract payment URL from response
-                    payment_url = result.get("payment_url")
-                    self.logger.info(f"Generated payment URL for {wa_id}: {payment_url}")
-                    return payment_url
+                if order_response.status_code != 200:
+                    self.logger.error(f"Order creation error: {order_response.status_code} - {order_response.text}")
+                    return False
+                
+                order_result = order_response.json()
+                order_id = order_result.get("order_id")
+                
+                if not order_id:
+                    self.logger.error(f"No order_id returned from subscription order endpoint")
+                    return False
+                
+                self.logger.info(f"Created subscription order {order_id} for {wa_id}")
+                
+                # Step 2: Trigger USSD push payment using the order_id
+                vendor = os.getenv("JSUITE_VENDOR", "TILL60452976")
+                transid = f"{vendor.replace('TILL', '')}_{order_id[-8:]}"  # Generate transaction ID
+                
+                ussd_payload = {
+                    "transid": transid,
+                    "order_id": order_id,
+                    "msisdn": str(wa_id)
+                }
+                
+                ussd_response = await client.post(
+                    "https://gateway.jsuite.app/checkout/wallet-payment",
+                    json=ussd_payload,
+                    headers={
+                        "Accept": "application/json",
+                        "Content-Type": "application/json"
+                    },
+                    timeout=30.0
+                )
+                
+                if ussd_response.status_code == 200:
+                    ussd_result = ussd_response.json()
+                    self.logger.info(f"USSD push payment triggered for {wa_id}: {ussd_result}")
+                    return True
                 else:
-                    self.logger.error(f"Payment endpoint error: {response.status_code} - {response.text}")
-                    return None
+                    self.logger.error(f"USSD payment error: {ussd_response.status_code} - {ussd_response.text}")
+                    return False
             
         except Exception as e:
-            self.logger.error(f"Error generating payment URL: {e}")
-            return None
+            self.logger.error(f"Error triggering USSD payment: {e}")
+            return False
 
     async def handle_flow_submission(self, wa_id: str, response_data: dict) -> None:
         """Handle WhatsApp Flow submission for payment"""
@@ -790,33 +820,8 @@ Please select your preferred plan:"""
                 await self.send_message(wa_id, f"❌ Error: Invalid plan '{plan}'. Please select daily, weekly, or monthly.")
                 return
             
-            # Generate payment URL
-            payment_url = await self._generate_payment_url(phone, plan)
-            
-            plan_info = {
-                "daily": {"price": "TZS 1,000", "duration": "24 hours"},
-                "weekly": {"price": "TZS 5,000", "duration": "7 days"},
-                "monthly": {"price": "TZS 20,000", "duration": "30 days"}
-            }
-            
-            if payment_url:
-                message = f"""✅ Payment details received!
-
-📋 *Selected Plan:* {plan.title()}
-💰 *Price:* {plan_info[plan]["price"]}
-⏰ *Duration:* {plan_info[plan]["duration"]}
-
-🔗 *Complete your payment here:*
-{payment_url}
-
-After successful payment, you'll get unlimited access to Wakili Msomi for {plan_info[plan]["duration"]}!
-
-💡 Need help? Contact us at info@bluefinsolutions.co.tz"""
-
-                await self.send_message(wa_id, message)
-                self.logger.info(f"Payment URL sent to {wa_id} for {plan} plan")
-            else:
-                await self.send_message(wa_id, "❌ Sorry, we're having trouble generating your payment link. Please try again later or contact support.")
+            # Process payment using USSD push
+            await self._process_payment_selection(phone, plan)
                 
         except Exception as e:
             self.logger.error(f"Error handling flow submission: {e}")
